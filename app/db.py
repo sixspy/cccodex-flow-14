@@ -13,8 +13,10 @@ SEEDS = [
 def connect(db_path=None):
     path = db_path or Config.database()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 @contextmanager
@@ -40,6 +42,65 @@ def init_db(db_path=None):
               source_uri TEXT NOT NULL,
               extracted INTEGER NOT NULL DEFAULT 0,
               landed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS idempotency_policy (
+              policy_date TEXT PRIMARY KEY,
+              strategy TEXT NOT NULL,
+              title TEXT NOT NULL,
+              pinned_by TEXT NOT NULL,
+              pinned_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS landing_batch (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              flow_id INTEGER NOT NULL,
+              strategy TEXT NOT NULL,
+              strategy_title TEXT NOT NULL,
+              status TEXT NOT NULL,
+              operator TEXT NOT NULL,
+              requested_count INTEGER NOT NULL DEFAULT 0,
+              success_count INTEGER NOT NULL DEFAULT 0,
+              skip_count INTEGER NOT NULL DEFAULT 0,
+              rollback_count INTEGER NOT NULL DEFAULT 0,
+              note TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS landing_record (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              batch_id INTEGER NOT NULL,
+              flow_id INTEGER NOT NULL,
+              idem_key TEXT NOT NULL,
+              state TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            -- 幂等闸：同一流同一钥条只允许一条活跃记录；回滚后钥条释放可再入库
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_idem_key
+              ON landing_record(flow_id, idem_key) WHERE state = 'active';
+
+            CREATE TABLE IF NOT EXISTS rollback_order (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              batch_id INTEGER NOT NULL,
+              flow_id INTEGER NOT NULL,
+              reason TEXT NOT NULL,
+              requestor TEXT NOT NULL,
+              status TEXT NOT NULL,
+              body TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              finished_at TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS land_event (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              batch_id INTEGER NOT NULL,
+              flow_id INTEGER NOT NULL,
+              event_type TEXT NOT NULL,
+              idem_key TEXT NOT NULL DEFAULT '',
+              message TEXT NOT NULL,
+              operator TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL
             );
         ''')
         if conn.execute("SELECT COUNT(*) c FROM flows").fetchone()["c"] == 0:
